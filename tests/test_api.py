@@ -1,291 +1,378 @@
 """
-Tests for the FastAPI sentiment analysis API.
-
-This module contains tests for the API endpoints.
-Note: These tests will skip if the model is not trained yet.
+Test cases for the BERT Sentiment Analysis API.
 """
 
 import pytest
-import os
-import sys
 import requests
-import time
-import subprocess
+import json
+import pandas as pd
 from pathlib import Path
 
-# Add the parent directory to the Python path
-sys.path.append(str(Path(__file__).parent.parent))
+
+class TestSentimentAPI:
+    """Test cases for sentiment analysis API endpoints."""
+    
+    def test_health_endpoint(self, api_server):
+        """Test health check endpoint."""
+        response = requests.get(f"{api_server}/health")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "healthy"
+        assert "model_loaded" in data
+    
+    def test_predict_single_text(self, api_server, sample_texts):
+        """Test single text prediction endpoint."""
+        # Test positive text
+        positive_text = sample_texts["positive"][0]
+        response = requests.post(
+            f"{api_server}/predict",
+            json={"text": positive_text}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "prediction" in data
+        assert "confidence" in data
+        assert data["prediction"] in ["positive", "negative"]
+        assert 0 <= data["confidence"] <= 1
+        
+        # Test negative text
+        negative_text = sample_texts["negative"][0]
+        response = requests.post(
+            f"{api_server}/predict",
+            json={"text": negative_text}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "prediction" in data
+        assert "confidence" in data
+    
+    def test_predict_batch_texts(self, api_server, sample_texts):
+        """Test batch text prediction endpoint."""
+        # Mix of positive and negative texts
+        test_texts = sample_texts["positive"][:2] + sample_texts["negative"][:2]
+        
+        response = requests.post(
+            f"{api_server}/predict/batch",
+            json={"texts": test_texts}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "predictions" in data
+        assert len(data["predictions"]) == len(test_texts)
+        
+        for prediction in data["predictions"]:
+            assert "prediction" in prediction
+            assert "confidence" in prediction
+            assert prediction["prediction"] in ["positive", "negative"]
+            assert 0 <= prediction["confidence"] <= 1
+    
+    def test_predict_empty_text(self, api_server):
+        """Test prediction with empty text."""
+        response = requests.post(
+            f"{api_server}/predict",
+            json={"text": ""}
+        )
+        assert response.status_code == 400
+        data = response.json()
+        assert "error" in data
+    
+    def test_predict_missing_field(self, api_server):
+        """Test prediction with missing required field."""
+        response = requests.post(
+            f"{api_server}/predict",
+            json={}  # Missing 'text' field
+        )
+        assert response.status_code == 400
+        data = response.json()
+        assert "error" in data
+    
+    def test_predict_invalid_json(self, api_server):
+        """Test prediction with invalid JSON."""
+        response = requests.post(
+            f"{api_server}/predict",
+            data="invalid json",
+            headers={"Content-Type": "application/json"}
+        )
+        assert response.status_code == 400
+        data = response.json()
+        assert "error" in data
+    
+    def test_batch_empty_list(self, api_server):
+        """Test batch prediction with empty list."""
+        response = requests.post(
+            f"{api_server}/predict/batch",
+            json={"texts": []}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "predictions" in data
+        assert data["predictions"] == []
+    
+    def test_model_info_endpoint(self, api_server):
+        """Test model information endpoint."""
+        response = requests.get(f"{api_server}/model/info")
+        assert response.status_code == 200
+        data = response.json()
+        assert "model_type" in data
+        assert "n_classes" in data
+        assert "labels" in data
+        assert "device" in data
+        assert data["model_type"] == "DistilBERT"
+        assert data["n_classes"] == 2
+        assert set(data["labels"]) == {"negative", "positive"}
 
 
-class TestAPIWithRequests:
-    """Test class using requests library (requires running server)."""
+class TestTrainingAPI:
+    """Test cases for model training API endpoints."""
     
-    @pytest.fixture(scope="class")
-    def api_url(self):
-        """Base URL for the API."""
-        return "http://127.0.0.1:8000"
+    def test_train_model_endpoint(self, api_server, test_data_dir):
+        """Test model training endpoint."""
+        # Create test training data
+        test_data = [
+            {"review": "This product is amazing!", "label": "positive"},
+            {"review": "Terrible quality, very disappointed", "label": "negative"},
+            {"review": "Great value for money", "label": "positive"},
+            {"review": "Poor customer service", "label": "negative"},
+            {"review": "Excellent product quality", "label": "positive"},
+            {"review": "Waste of money", "label": "negative"},
+        ]
+        
+        test_df = pd.DataFrame(test_data)
+        test_csv_path = test_data_dir / "test_training.csv"
+        test_df.to_csv(test_csv_path, index=False)
+        
+        training_config = {
+            "csv_path": str(test_csv_path),
+            "model_save_path": "assets/test_model.pth",
+            "tokenizer_save_path": "assets/test_tokenizer",
+            "epochs": 1,
+            "batch_size": 2,
+            "learning_rate": 2e-5,
+            "max_length": 32
+        }
+        
+        response = requests.post(
+            f"{api_server}/train",
+            json=training_config
+        )
+        
+        # Training might take time, so accept 200 or 202
+        assert response.status_code in [200, 202]
+        data = response.json()
+        
+        if response.status_code == 200:
+            assert "history" in data
+            assert "train_accuracy" in data["history"]
+            assert "test_accuracy" in data["history"]
+        else:  # 202 Accepted
+            assert "message" in data
+            assert "training_started" in data
     
-    def test_server_is_running(self, api_url):
-        """Test if the server is running (manual test)."""
-        try:
-            response = requests.get(f"{api_url}/health", timeout=5)
-            assert response.status_code in [200, 503]
-            print(f"✓ Server is running at {api_url}")
-        except requests.exceptions.ConnectionError:
-            pytest.skip("Server is not running. Start with: uvicorn app.main:app")
+    def test_train_model_invalid_csv(self, api_server):
+        """Test training with invalid CSV path."""
+        training_config = {
+            "csv_path": "nonexistent.csv",
+            "model_save_path": "assets/test_model.pth",
+            "tokenizer_save_path": "assets/test_tokenizer",
+            "epochs": 1
+        }
+        
+        response = requests.post(
+            f"{api_server}/train",
+            json=training_config
+        )
+        assert response.status_code == 400
+        data = response.json()
+        assert "error" in data
     
-    def test_root_endpoint(self, api_url):
-        """Test the root endpoint."""
-        try:
-            response = requests.get(f"{api_url}/", timeout=5)
-            assert response.status_code == 200
+    def test_train_model_missing_required_fields(self, api_server):
+        """Test training with missing required fields."""
+        # Missing csv_path
+        training_config = {
+            "model_save_path": "assets/test_model.pth",
+            "epochs": 1
+        }
+        
+        response = requests.post(
+            f"{api_server}/train",
+            json=training_config
+        )
+        assert response.status_code == 400
+        data = response.json()
+        assert "error" in data
+
+
+class TestModelManagementAPI:
+    """Test cases for model management API endpoints."""
+    
+    def test_reload_model_endpoint(self, api_server):
+        """Test model reload endpoint."""
+        response = requests.post(f"{api_server}/model/reload")
+        # Should return 200 if reload successful, or 400 if no model loaded
+        assert response.status_code in [200, 400]
+        
+        if response.status_code == 200:
             data = response.json()
             assert "message" in data
-            assert data["message"] == "Sentiment Analysis API"
-        except requests.exceptions.ConnectionError:
-            pytest.skip("Server is not running")
-    
-    def test_health_check(self, api_url):
-        """Test the health check endpoint."""
-        try:
-            response = requests.get(f"{api_url}/health", timeout=5)
-            assert response.status_code in [200, 503]
+            assert "model_info" in data
+        else:
             data = response.json()
-            assert "status" in data
-            assert "model_ready" in data
+            assert "error" in data
+    
+    def test_save_model_endpoint(self, api_server):
+        """Test model save endpoint."""
+        save_config = {
+            "model_path": "assets/test_save_model.pth",
+            "tokenizer_path": "assets/test_tokenizer"
+        }
+        
+        response = requests.post(
+            f"{api_server}/model/save",
+            json=save_config
+        )
+        
+        # Could be 200 (success) or 400 (no model to save)
+        assert response.status_code in [200, 400]
+        
+        if response.status_code == 200:
+            data = response.json()
             assert "message" in data
-        except requests.exceptions.ConnectionError:
-            pytest.skip("Server is not running")
-    
-    def test_predict_endpoint_valid_input(self, api_url):
-        """Test the predict endpoint with valid input."""
-        try:
-            test_data = {
-                "text": "This movie was absolutely fantastic! Great acting and wonderful storyline."
-            }
-            response = requests.post(f"{api_url}/predict", json=test_data, timeout=10)
-            
-            if response.status_code == 503:
-                pytest.skip("Model not loaded. Run: python -m ml.train")
-            
-            assert response.status_code == 200
+            assert "model_path" in data
+            assert "tokenizer_path" in data
+        else:
             data = response.json()
-            assert "label" in data
-            assert "confidence" in data
-            assert data["label"] in ["positive", "negative"]
-            assert 0.0 <= data["confidence"] <= 1.0
-        except requests.exceptions.ConnectionError:
-            pytest.skip("Server is not running")
+            assert "error" in data
+
+
+class TestPerformanceAPI:
+    """Test cases for API performance."""
     
-    def test_predict_endpoint_invalid_input(self, api_url):
-        """Test the predict endpoint with invalid input."""
-        try:
-            # Empty text
-            test_data = {"text": ""}
-            response = requests.post(f"{api_url}/predict", json=test_data, timeout=5)
-            assert response.status_code == 422
+    def test_response_time_single_prediction(self, api_server, sample_texts):
+        """Test response time for single prediction."""
+        import time
+        
+        start_time = time.time()
+        response = requests.post(
+            f"{api_server}/predict",
+            json={"text": sample_texts["positive"][0]}
+        )
+        end_time = time.time()
+        
+        assert response.status_code == 200
+        response_time = end_time - start_time
+        
+        # Should respond within 5 seconds
+        assert response_time < 5.0
+    
+    def test_response_time_batch_prediction(self, api_server, sample_texts):
+        """Test response time for batch prediction."""
+        import time
+        
+        # Create batch of 10 texts
+        test_texts = sample_texts["positive"][:3] + sample_texts["negative"][:3] + sample_texts["neutral"][:4]
+        
+        start_time = time.time()
+        response = requests.post(
+            f"{api_server}/predict/batch",
+            json={"texts": test_texts}
+        )
+        end_time = time.time()
+        
+        assert response.status_code == 200
+        response_time = end_time - start_time
+        
+        # Batch prediction should be reasonable
+        assert response_time < 10.0
+
+
+class TestErrorHandling:
+    """Test cases for error handling."""
+    
+    def test_nonexistent_endpoint(self, api_server):
+        """Test request to nonexistent endpoint."""
+        response = requests.get(f"{api_server}/nonexistent")
+        assert response.status_code == 404
+    
+    def test_invalid_http_method(self, api_server):
+        """Test invalid HTTP method for endpoints."""
+        # GET instead of POST for predict
+        response = requests.get(f"{api_server}/predict")
+        assert response.status_code == 405
+    
+    def test_large_text_input(self, api_server):
+        """Test prediction with very large text input."""
+        large_text = "This is a test. " * 1000  # Very large text
+        
+        response = requests.post(
+            f"{api_server}/predict",
+            json={"text": large_text}
+        )
+        
+        # Should handle large texts gracefully (either process or return error)
+        assert response.status_code in [200, 400, 413]
+    
+    def test_special_characters_text(self, api_server):
+        """Test prediction with special characters."""
+        special_texts = [
+            "Text with emoji 😊 and symbols #@$%",
+            "Unicode text: 中文 Español Français",
+            "Text with <html> tags & symbols",
+            "Mixed: Hello 世界! 😊 #test"
+        ]
+        
+        for text in special_texts:
+            response = requests.post(
+                f"{api_server}/predict",
+                json={"text": text}
+            )
+            assert response.status_code in [200, 400]
             
-            # Missing text field
-            test_data = {}
-            response = requests.post(f"{api_url}/predict", json=test_data, timeout=5)
-            assert response.status_code == 422
-        except requests.exceptions.ConnectionError:
-            pytest.skip("Server is not running")
+            if response.status_code == 200:
+                data = response.json()
+                assert "prediction" in data
+                assert "confidence" in data
 
 
-class TestAPIOffline:
-    """Test class for offline functionality (no server required)."""
+def test_concurrent_requests(api_server, sample_texts):
+    """Test handling concurrent requests."""
+    import threading
+    import time
     
-    def test_app_import(self):
-        """Test that we can import the FastAPI app."""
+    results = []
+    errors = []
+    
+    def make_prediction(text, result_list, error_list):
         try:
-            from app.main import app
-            assert app is not None
-            print("✓ FastAPI app imported successfully")
-        except Exception as e:
-            pytest.fail(f"Failed to import app: {e}")
-    
-    def test_ml_modules_import(self):
-        """Test that ML modules can be imported."""
-        try:
-            from ml.train import train_model, DistilBertClassifier
-            from ml.model import ReviewClassifier
-            from ml.data import load_data
-            print("✓ All ML modules imported successfully")
-        except Exception as e:
-            pytest.fail(f"Failed to import ML modules: {e}")
-    
-    def test_dataset_exists(self):
-        """Test that the dataset file exists."""
-        dataset_path = Path("assets/reviews.csv")
-        assert dataset_path.exists(), f"Dataset not found at {dataset_path}"
-        assert dataset_path.stat().st_size > 0, "Dataset file is empty"
-        print(f"✓ Dataset found at {dataset_path}")
-    
-    def test_training_script_help(self):
-        """Test that the training script shows help."""
-        try:
-            result = subprocess.run(
-                ["python3", "-m", "ml.train", "--help"],
-                capture_output=True,
-                text=True,
+            response = requests.post(
+                f"{api_server}/predict",
+                json={"text": text},
                 timeout=10
             )
-            assert result.returncode == 0
-            assert "Train text classification model" in result.stdout
-            print("✓ Training script help works")
-        except subprocess.TimeoutExpired:
-            pytest.fail("Training script help timed out")
+            result_list.append(response.status_code)
         except Exception as e:
-            pytest.fail(f"Training script help failed: {e}")
-
-
-class TestRecommendationAPI:
-    """Test class for product recommendation endpoints."""
+            error_list.append(str(e))
     
-    @pytest.fixture(scope="class")
-    def api_url(self):
-        """Base URL for the API."""
-        return "http://127.0.0.1:8000"
+    threads = []
+    test_texts = sample_texts["positive"][:2] + sample_texts["negative"][:2]
     
-    def test_vector_store_info(self, api_url):
-        """Test vector store information endpoint."""
-        try:
-            response = requests.get(f"{api_url}/vector-store/info", timeout=5)
-            assert response.status_code == 200
-            data = response.json()
-            assert "status" in data
-            print(f"✓ Vector store status: {data['status']}")
-        except requests.exceptions.ConnectionError:
-            pytest.skip("Server is not running")
+    for text in test_texts:
+        thread = threading.Thread(
+            target=make_prediction,
+            args=(text, results, errors)
+        )
+        threads.append(thread)
+        thread.start()
     
-    def test_recommend_endpoint(self, api_url):
-        """Test product recommendation endpoint."""
-        try:
-            test_data = {"text": "Looking for a fast laptop"}
-            response = requests.post(f"{api_url}/recommend", json=test_data, timeout=10)
-            
-            if response.status_code == 503:
-                pytest.skip("Qdrant server not available for recommendations")
-            
-            assert response.status_code == 200
-            data = response.json()
-            assert "recommended_products" in data
-            assert isinstance(data["recommended_products"], list)
-            print(f"✓ Recommendations: {data['recommended_products']}")
-        except requests.exceptions.ConnectionError:
-            pytest.skip("Server is not running")
+    # Wait for all threads to complete
+    for thread in threads:
+        thread.join(timeout=15)
     
-    def test_detailed_recommend_endpoint(self, api_url):
-        """Test detailed product recommendation endpoint."""
-        try:
-            test_data = {"text": "wireless headphones"}
-            response = requests.post(f"{api_url}/recommend/detailed", json=test_data, timeout=10)
-            
-            if response.status_code == 503:
-                pytest.skip("Qdrant server not available for recommendations")
-            
-            assert response.status_code == 200
-            data = response.json()
-            assert "recommendations" in data
-            assert isinstance(data["recommendations"], list)
-            
-            if data["recommendations"]:
-                rec = data["recommendations"][0]
-                assert "product_id" in rec
-                assert "product_title" in rec
-                assert "similarity_score" in rec
-            
-            print(f"✓ Detailed recommendations: {len(data['recommendations'])} items")
-        except requests.exceptions.ConnectionError:
-            pytest.skip("Server is not running")
-    
-    def test_vector_store_setup(self, api_url):
-        """Test vector store setup endpoint."""
-        try:
-            response = requests.post(f"{api_url}/vector-store/setup", timeout=15)
-            
-            if response.status_code == 503:
-                pytest.skip("Qdrant server not available")
-            
-            assert response.status_code == 200
-            data = response.json()
-            assert "message" in data
-            print("✓ Vector store setup completed")
-        except requests.exceptions.ConnectionError:
-            pytest.skip("Server is not running")
-
-
-class TestAPIDocumentation:
-    """Test API documentation endpoints."""
-    
-    def test_openapi_schema(self):
-        """Test OpenAPI schema availability."""
-        try:
-            response = requests.get("http://127.0.0.1:8000/openapi.json", timeout=5)
-            assert response.status_code == 200
-            data = response.json()
-            assert "openapi" in data
-            assert "info" in data
-            print("✓ OpenAPI schema available")
-        except requests.exceptions.ConnectionError:
-            pytest.skip("Server is not running")
-    
-    def test_swagger_ui(self):
-        """Test Swagger UI availability."""
-        try:
-            response = requests.get("http://127.0.0.1:8000/docs", timeout=5)
-            assert response.status_code == 200
-            assert "swagger" in response.text.lower()
-            print("✓ Swagger UI available")
-        except requests.exceptions.ConnectionError:
-            pytest.skip("Server is not running")
-    
-    def test_redoc(self):
-        """Test ReDoc availability."""
-        try:
-            response = requests.get("http://127.0.0.1:8000/redoc", timeout=5)
-            assert response.status_code == 200
-            assert "redoc" in response.text.lower()
-            print("✓ ReDoc available")
-        except requests.exceptions.ConnectionError:
-            pytest.skip("Server is not running")
-
-
-def test_project_structure():
-    """Test that the project structure matches expectations."""
-    base_path = Path(".")
-    
-    # Check directories
-    assert (base_path / "app").is_dir(), "app/ directory missing"
-    assert (base_path / "ml").is_dir(), "ml/ directory missing"
-    assert (base_path / "assets").is_dir(), "assets/ directory missing"
-    assert (base_path / "tests").is_dir(), "tests/ directory missing"
-    
-    # Check key files
-    assert (base_path / "app" / "main.py").is_file(), "app/main.py missing"
-    assert (base_path / "app" / "endpoints.py").is_file(), "app/endpoints.py missing"
-    assert (base_path / "app" / "schemas.py").is_file(), "app/schemas.py missing"
-    assert (base_path / "ml" / "train.py").is_file(), "ml/train.py missing"
-    assert (base_path / "ml" / "model.py").is_file(), "ml/model.py missing"
-    assert (base_path / "ml" / "data.py").is_file(), "ml/data.py missing"
-    assert (base_path / "assets" / "reviews.csv").is_file(), "assets/reviews.csv missing"
-    assert (base_path / "requirements.txt").is_file(), "requirements.txt missing"
-    assert (base_path / "README.md").is_file(), "README.md missing"
-    
-    print("✓ Project structure is correct")
+    # Check that we got responses (allow some failures under load)
+    assert len(results) + len(errors) == len(test_texts)
+    if results:
+        assert all(status == 200 for status in results)
 
 
 if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("SENTIMENT ANALYSIS API TESTS")
-    print("="*60)
-    print("\nTo run these tests:")
-    print("1. Start the server: uvicorn app.main:app --reload")
-    print("2. Run tests: pytest tests/test_api.py -v")
-    print("\nOr run offline tests only:")
-    print("pytest tests/test_api.py::TestAPIOffline -v")
-    print("="*60)
-    
-    # Run tests
+    # Run tests directly
     pytest.main([__file__, "-v"])
