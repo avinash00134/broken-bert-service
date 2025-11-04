@@ -43,11 +43,30 @@ class ReviewDataset(Dataset):
         return {
             'input_ids': encoding['input_ids'].flatten(),
             'attention_mask': encoding['attention_mask'].flatten(),
-            'label': torch.tensor(label, dtype=torch.float)
+            'label': torch.tensor(label, dtype=torch.long)  # Changed to long for CrossEntropyLoss
         }
 
 
-def load_data(csv_path: str, test_size: float = 0.2, random_state: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def prepare_data(csv_path: str) -> Tuple[List[str], List[int]]:
+    """
+    Prepare data from CSV file.
+    
+    Args:
+        csv_path: Path to CSV file
+        
+    Returns:
+        Tuple of (texts, labels)
+    """
+    df = pd.read_csv(csv_path)
+    
+    # Encode labels as integers
+    label_map = {'negative': 0, 'positive': 1}
+    texts = df['review'].tolist()
+    labels = df['label'].map(label_map).tolist()
+    
+    return texts, labels
+
+def load_data(csv_path: str, test_size: float = 0.2, random_state: int = 42, sample_frac: float = 0.5) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Load and split the dataset.
     
@@ -55,12 +74,18 @@ def load_data(csv_path: str, test_size: float = 0.2, random_state: int = 42) -> 
         csv_path: Path to the CSV file
         test_size: Proportion of data for testing
         random_state: Random seed for reproducibility
+        sample_frac: Fraction of data to use (for memory constraints)
         
     Returns:
         Tuple of (train_df, test_df)
     """
     # Load the CSV file
     df = pd.read_csv(csv_path)
+    
+    # Sample a fraction of data if needed for memory constraints
+    if sample_frac < 1.0:
+        df = df.sample(frac=sample_frac, random_state=random_state)
+        print(f"Using {sample_frac*100}% of data: {len(df)} samples")
     
     df = df.copy()
     # Convert labels to numeric (0 for negative, 1 for positive)
@@ -113,8 +138,7 @@ def get_class_weights(df: pd.DataFrame) -> torch.Tensor:
     Returns:
         Tensor of class weights
     """
-    df_sample = df.sample(n=2000)
-    label_counts = df_sample['label_num'].value_counts().sort_index()
+    label_counts = df['label_num'].value_counts().sort_index()
     total_samples = len(df)
     
     weights = []

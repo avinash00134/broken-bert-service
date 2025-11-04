@@ -46,34 +46,40 @@ async def lifespan(app: FastAPI):
     
     try:
         # Load the model during startup
-        model_path = "accets/model.pth"
-        tokenizer_path = "accets/tokenizer/"
+        # FIXED: Corrected path from "accets" to "assets"
+        model_path = "assets/model.pth"
+        tokenizer_path = "assets/tokenizer/"
+        
+        # Create assets directory if it doesn't exist
+        os.makedirs("assets", exist_ok=True)
         
         if not os.path.exists(model_path):
             logger.error(f"Model file not found: {model_path}")
             logger.error("Please run 'python -m ml.train' first to train the model.")
-            raise FileNotFoundError(f"Model file not found: {model_path}")
-        
-        if not os.path.exists(tokenizer_path):
+            # Don't raise error, just log and continue without model
+            logger.warning("API starting without model - training required")
+        elif not os.path.exists(tokenizer_path):
             logger.error(f"Tokenizer directory not found: {tokenizer_path}")
             logger.error("Please run 'python -m ml.train' first to train the model.")
-            raise FileNotFoundError(f"Tokenizer directory not found: {tokenizer_path}")
-        
-        # Initialize the classifier
-        classifier = ReviewClassifier(
-            model_path=model_path,
-            tokenizer_path=tokenizer_path
-        )
-        
-        # Set the classifier in the endpoints module
-        set_classifier(classifier)
-        
-        logger.info("Model loaded successfully!")
-        logger.info(f"Model info: {classifier.get_model_info()}")
+            # Don't raise error, just log and continue without model
+            logger.warning("API starting without model - training required")
+        else:
+            # Initialize the classifier
+            classifier = ReviewClassifier(
+                model_path=model_path,
+                tokenizer_path=tokenizer_path
+            )
+            
+            # Set the classifier in the endpoints module
+            set_classifier(classifier)
+            
+            logger.info("Model loaded successfully!")
+            logger.info(f"Model info: {classifier.get_model_info()}")
         
     except Exception as e:
         logger.error(f"Failed to load model during startup: {str(e)}")
-        raise
+        # Don't crash the app if model loading fails
+        logger.warning("API starting without model due to loading error")
     
     yield
     
@@ -113,8 +119,8 @@ async def not_found_handler(request, exc):
         status_code=404,
         content={
             "error": "NotFound",
-            "message": "The requested endpoint was not found",
-            "details": f"Path '{request.url.path}' does not exist"
+            "message": "The requested resource was not found",
+            "path": request.url.path
         }
     )
 
@@ -122,13 +128,25 @@ async def not_found_handler(request, exc):
 @app.exception_handler(500)
 async def internal_error_handler(request, exc):
     """Handle 500 errors."""
-    logger.error(f"Internal server error: {str(exc)}")
+    logger.error(f"Internal server error: {exc}")
     return JSONResponse(
         status_code=500,
         content={
             "error": "InternalServerError",
-            "message": "An internal server error occurred",
-            "details": None
+            "message": "An internal server error occurred"
+        }
+    )
+
+
+@app.exception_handler(422)
+async def validation_error_handler(request, exc):
+    """Handle 422 validation errors."""
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "ValidationError",
+            "message": "Invalid input data",
+            "details": str(exc)
         }
     )
 

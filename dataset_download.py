@@ -2,7 +2,7 @@ from datasets import load_dataset
 import pandas as pd
 
 # Number of samples you want to extract
-n_samples = 30000  # You can adjust to 5000, 20000, etc.
+n_samples = 20000  # You can adjust to 5000, 20000, etc.
 
 # Load Amazon polarity dataset (doesn't download full file at once)
 dataset = load_dataset("amazon_polarity", split=f"train[:{n_samples}]")

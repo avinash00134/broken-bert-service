@@ -41,7 +41,14 @@ class ReviewClassifier:
         
         # Check if files exist
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+            # Try the best model if main model doesn't exist
+            best_model_path = model_path.replace('.pth', '_best.pth')
+            if os.path.exists(best_model_path):
+                model_path = best_model_path
+                print(f"Using best model: {model_path}")
+            else:
+                raise FileNotFoundError(f"Model file not found: {model_path}")
+        
         if not os.path.exists(tokenizer_path):
             raise FileNotFoundError(f"Tokenizer directory not found: {tokenizer_path}")
         
@@ -77,9 +84,9 @@ class ReviewClassifier:
             raise RuntimeError(f"Failed to load model: {str(e)}")
         
         # Define label mapping
-        self.label_map = {1: 'negative', 0: 'positive'}
+        self.label_map = {0: 'negative', 1: 'positive'}
         
-    def predict(self, text: str, max_length: int = 128) -> Tuple[str, float]:
+    def predict(self, text: str, max_length: int = 64) -> Tuple[str, float]:  # Reduced default max_length
         """
         Predict the sentiment of the given text.
         
@@ -114,6 +121,7 @@ class ReviewClassifier:
         input_ids = encoding['input_ids'].to(self.device)
         attention_mask = encoding['attention_mask'].to(self.device)
         
+        with torch.no_grad():
             outputs = self.model(input_ids, attention_mask)
             
             # Apply softmax to get probabilities
@@ -127,7 +135,7 @@ class ReviewClassifier:
         
         return predicted_label, confidence_score
     
-    def predict_batch(self, texts: list, max_length: int = 128, batch_size: int = 16) -> list:
+    def predict_batch(self, texts: list, max_length: int = 64, batch_size: int = 8) -> list:  # Reduced defaults
         """
         Predict sentiments for a batch of texts.
         

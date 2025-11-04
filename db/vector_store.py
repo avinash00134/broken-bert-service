@@ -101,7 +101,7 @@ class ProductVectorStore:
                 self.client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(
-                        size=self.vector_size,
+                        size=self.vector_size,  # FIXED: Use correct vector size
                         distance=Distance.COSINE
                     )
                 )
@@ -149,7 +149,8 @@ class ProductVectorStore:
                 # Use [CLS] token embedding (first token)
                 embedding = outputs.last_hidden_state[:, 0].cpu().numpy()
             
-            return np.append(embedding.flatten(), 0.0)
+            # FIXED: Remove the extra dimension, use flatten directly
+            return embedding.flatten()
             
         except Exception as e:
             logger.error(f"Failed to encode text: {e}")
@@ -313,9 +314,9 @@ class ProductVectorStore:
         try:
             info = self.client.get_collection(self.collection_name)
             return {
-                "name": info.config.params.vectors.size,
+                "name": self.collection_name,  # FIXED: Use collection_name instead of vector size
                 "vector_size": info.config.params.vectors.size,
-                "distance": info.config.params.vectors.distance,
+                "distance": info.config.params.vectors.distance.name,
                 "points_count": info.points_count
             }
         except Exception as e:
