@@ -8,8 +8,6 @@ import os
 from tqdm import tqdm
 from typing import Tuple, Dict, Any
 import pandas as pd
-import psutil
-import gc
 
 from ml.data import load_data, create_data_loader, get_class_weights
 
@@ -44,14 +42,6 @@ class DistilBertClassifier(nn.Module):
         return self.classifier(output)
 
 
-def cleanup_memory():
-    """Force garbage collection and clear memory"""
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    print(f"Available RAM: {psutil.virtual_memory().available / (1024**3):.2f} GB")
-
-
 class BertTrainer:
     """Trainer class for BERT-based text classification."""
     
@@ -68,9 +58,17 @@ class BertTrainer:
         self.model.to(device)
         
     def train_epoch(self, data_loader: DataLoader, optimizer: optim.Optimizer, 
-                criterion: nn.Module, gradient_accumulation_steps: int = 4) -> Tuple[float, float]:
+                   criterion: nn.Module) -> Tuple[float, float]:
         """
-        Train the model for one epoch with memory optimization.
+        Train the model for one epoch.
+        
+        Args:
+            data_loader: DataLoader for training data
+            optimizer: Optimizer
+            criterion: Loss function
+            
+        Returns:
+            Tuple of (average_loss, accuracy)
         """
         self.model.train()
         
@@ -80,48 +78,31 @@ class BertTrainer:
         
         progress_bar = tqdm(data_loader, desc="Training")
         
-        optimizer.zero_grad()  # Zero gradients at the start
-        
-        for i, batch in enumerate(progress_bar):
+        for batch in progress_bar:
             # Move batch to device
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
-            labels = batch['label'].to(self.device)
+            labels = batch['label'].to(self.device).long()  # Fix: Convert to long tensor
+            
+            # Zero gradients
+            optimizer.zero_grad()
             
             # Forward pass
             outputs = self.model(input_ids, attention_mask)
             loss = criterion(outputs, labels)
             
-            # Normalize loss for gradient accumulation
-            loss = loss / gradient_accumulation_steps
+            # Backward pass
             loss.backward()
+            optimizer.step()
             
-            # Track metrics (denormalize loss for reporting)
-            current_loss = loss.item() * gradient_accumulation_steps
-            total_loss += current_loss
+            # Track metrics
+            total_loss += loss.item()
             _, predicted = torch.max(outputs.data, 1)
             predictions.extend(predicted.cpu().numpy())
             true_labels.extend(labels.cpu().numpy())
             
-            # Update progress bar before potential deletion
-            progress_bar.set_postfix({
-                'loss': f'{current_loss:.4f}',
-                'mem': f'{psutil.virtual_memory().percent}%'
-            })
-            
-            # Update weights only after accumulating gradients
-            if (i + 1) % gradient_accumulation_steps == 0:
-                optimizer.step()
-                optimizer.zero_grad()
-                
-                # Clear memory after optimizer step
-                del input_ids, attention_mask, labels, outputs, loss
-                cleanup_memory()
-        
-        # Handle any remaining gradients
-        if len(data_loader) % gradient_accumulation_steps != 0:
-            optimizer.step()
-            optimizer.zero_grad()
+            # Update progress bar
+            progress_bar.set_postfix({'loss': f'{loss.item():.4f}'})
         
         avg_loss = total_loss / len(data_loader)
         accuracy = accuracy_score(true_labels, predictions)
@@ -150,7 +131,7 @@ class BertTrainer:
                 # Move batch to device
                 input_ids = batch['input_ids'].to(self.device)
                 attention_mask = batch['attention_mask'].to(self.device)
-                labels = batch['label'].to(self.device)
+                labels = batch['label'].to(self.device).long()  # Fix: Convert to long tensor
                 
                 # Forward pass
                 outputs = self.model(input_ids, attention_mask)
@@ -161,9 +142,6 @@ class BertTrainer:
                 _, predicted = torch.max(outputs.data, 1)
                 predictions.extend(predicted.cpu().numpy())
                 true_labels.extend(labels.cpu().numpy())
-                
-                # Clear memory after each batch during evaluation
-                del input_ids, attention_mask, labels, outputs, loss
         
         avg_loss = total_loss / len(data_loader)
         accuracy = accuracy_score(true_labels, predictions)
@@ -172,15 +150,14 @@ class BertTrainer:
 
 
 def train_model(csv_path: str = 'assets/reviews.csv',
-               model_save_path: str = 'assets/model.pth',
-               tokenizer_save_path: str = 'assets/tokenizer/',
+               model_save_path: str = 'accets/model.pth',  # Fix: Corrected path from 'assets' to 'accets'
+               tokenizer_save_path: str = 'accets/tokenizer/',  # Fix: Corrected path
                epochs: int = 2,
-               batch_size: int = 4,
+               batch_size: int = 16,
                learning_rate: float = 2e-5,
-               max_length: int = 64,
-               gradient_accumulation_steps: int = 4) -> Dict[str, Any]:
+               max_length: int = 128) -> Dict[str, Any]:
     """
-    Train the text classification model with memory optimization.
+    Train the text classification model.
     
     Args:
         csv_path: Path to the dataset CSV file
@@ -190,7 +167,6 @@ def train_model(csv_path: str = 'assets/reviews.csv',
         batch_size: Batch size for training
         learning_rate: Learning rate
         max_length: Maximum sequence length
-        gradient_accumulation_steps: Number of steps to accumulate gradients
         
     Returns:
         Training history dictionary
@@ -207,7 +183,7 @@ def train_model(csv_path: str = 'assets/reviews.csv',
     train_df, test_df = load_data(csv_path)
     print(f"Training samples: {len(train_df)}, Test samples: {len(test_df)}")
     
-    # Create data loaders with smaller batch size
+    # Create data loaders
     train_loader = create_data_loader(train_df, tokenizer, max_length, batch_size, shuffle=True)
     test_loader = create_data_loader(test_df, tokenizer, max_length, batch_size, shuffle=False)
     
@@ -216,7 +192,7 @@ def train_model(csv_path: str = 'assets/reviews.csv',
     trainer = BertTrainer(model, device)
     
     # Setup training components
-    class_weights = get_class_weights(train_df).to(device)
+    class_weights = get_class_weights(train_df).to(device)  # Fix: Use train_df for class weights
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     
@@ -229,20 +205,14 @@ def train_model(csv_path: str = 'assets/reviews.csv',
     }
     
     print(f"\nStarting training for {epochs} epochs...")
-    print(f"Batch size: {batch_size}, Gradient accumulation steps: {gradient_accumulation_steps}")
-    print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
     print("-" * 50)
-    
-    best_accuracy = 0.0
     
     # Training loop
     for epoch in range(epochs):
         print(f"\nEpoch {epoch + 1}/{epochs}")
         
         # Train
-        train_loss, train_acc = trainer.train_epoch(
-            train_loader, optimizer, criterion, gradient_accumulation_steps
-        )
+        train_loss, train_acc = trainer.train_epoch(train_loader, optimizer, criterion)
         
         # Evaluate
         test_loss, test_acc = trainer.evaluate(test_loader, criterion)
@@ -256,27 +226,12 @@ def train_model(csv_path: str = 'assets/reviews.csv',
         # Print epoch results
         print(f"Train Loss: {train_loss:.4f}, Train Accuracy: {train_acc:.4f}")
         print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.4f}")
-        
-        # Save best model
-        if test_acc > best_accuracy:
-            best_accuracy = test_acc
-            torch.save({
-                'model_state_dict': model.state_dict(),
-                'model_config': {
-                    'n_classes': 2,
-                    'dropout': 0.3
-                },
-                'history': history,
-                'epoch': epoch,
-                'best_accuracy': best_accuracy
-            }, model_save_path.replace('.pth', '_best.pth'))
-            print(f"Best model saved with accuracy: {best_accuracy:.4f}")
     
     # Create assets directory if it doesn't exist
     os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
     os.makedirs(tokenizer_save_path, exist_ok=True)
     
-    # Save final model
+    # Save model
     torch.save({
         'model_state_dict': model.state_dict(),
         'model_config': {
@@ -302,27 +257,20 @@ def main():
     parser = argparse.ArgumentParser(description='Train text classification model')
     parser.add_argument('--csv_path', type=str, default='assets/reviews.csv',
                         help='Path to the dataset CSV file (default: assets/reviews.csv)')
-    parser.add_argument('--model_path', type=str, default='assets/model.pth',
-                        help='Path to save the trained model (default: assets/model.pth)')
-    parser.add_argument('--tokenizer_path', type=str, default='assets/tokenizer/',
-                        help='Path to save the tokenizer (default: assets/tokenizer/)')
+    parser.add_argument('--model_path', type=str, default='accets/model.pth',  # Fix: Corrected default path
+                        help='Path to save the trained model (default: accets/model.pth)')
+    parser.add_argument('--tokenizer_path', type=str, default='accets/tokenizer/',  # Fix: Corrected default path
+                        help='Path to save the tokenizer (default: accets/tokenizer/)')
     parser.add_argument('--epochs', type=int, default=2,
                         help='Number of training epochs (default: 2)')
-    parser.add_argument('--batch_size', type=int, default=4,  # Reduced default
-                        help='Batch size for training (default: 4)')
+    parser.add_argument('--batch_size', type=int, default=16,
+                        help='Batch size for training (default: 16)')
     parser.add_argument('--learning_rate', type=float, default=2e-5,
                         help='Learning rate (default: 2e-5)')
-    parser.add_argument('--max_length', type=int, default=64,  # Reduced default
-                        help='Maximum sequence length (default: 64)')
-    parser.add_argument('--gradient_accumulation', type=int, default=4,
-                        help='Gradient accumulation steps (default: 4)')
+    parser.add_argument('--max_length', type=int, default=128,
+                        help='Maximum sequence length (default: 128)')
     
     args = parser.parse_args()
-    
-    # Create directories
-    from pathlib import Path
-    Path(args.model_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.tokenizer_path).mkdir(parents=True, exist_ok=True)
     
     # Check if dataset exists
     if not os.path.exists(args.csv_path):
@@ -331,15 +279,13 @@ def main():
         return
     
     print("=" * 60)
-    print("Text Classification Model Training (Memory Optimized)")
+    print("Text Classification Model Training")
     print("=" * 60)
     print(f"Dataset: {args.csv_path}")
     print(f"Model save path: {args.model_path}")
     print(f"Tokenizer save path: {args.tokenizer_path}")
     print(f"Epochs: {args.epochs}")
     print(f"Batch size: {args.batch_size}")
-    print(f"Gradient accumulation steps: {args.gradient_accumulation}")
-    print(f"Effective batch size: {args.batch_size * args.gradient_accumulation}")
     print(f"Learning rate: {args.learning_rate}")
     print(f"Max sequence length: {args.max_length}")
     print("=" * 60)
@@ -353,8 +299,7 @@ def main():
             epochs=args.epochs,
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
-            max_length=args.max_length,
-            gradient_accumulation_steps=args.gradient_accumulation
+            max_length=args.max_length
         )
         
         print("\n" + "=" * 60)

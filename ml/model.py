@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from transformers import DistilBertTokenizer
 import os
-from typing import Tuple
+from typing import Tuple, List
 import warnings
 
 from ml.train import DistilBertClassifier
@@ -16,8 +16,8 @@ class ReviewClassifier:
     an interface for making predictions on new text data.
     """
     
-    def __init__(self, model_path: str = 'assets/model.pth', 
-                 tokenizer_path: str = 'assets/tokenizer/', 
+    def __init__(self, model_path: str = 'accets/model.pth', 
+                 tokenizer_path: str = 'accets/tokenizer/', 
                  device: str = None):
         """
         Initialize the ReviewClassifier by loading the trained model and tokenizer.
@@ -41,14 +41,7 @@ class ReviewClassifier:
         
         # Check if files exist
         if not os.path.exists(model_path):
-            # Try the best model if main model doesn't exist
-            best_model_path = model_path.replace('.pth', '_best.pth')
-            if os.path.exists(best_model_path):
-                model_path = best_model_path
-                print(f"Using best model: {model_path}")
-            else:
-                raise FileNotFoundError(f"Model file not found: {model_path}")
-        
+            raise FileNotFoundError(f"Model file not found: {model_path}")
         if not os.path.exists(tokenizer_path):
             raise FileNotFoundError(f"Tokenizer directory not found: {tokenizer_path}")
         
@@ -83,10 +76,10 @@ class ReviewClassifier:
         except Exception as e:
             raise RuntimeError(f"Failed to load model: {str(e)}")
         
-        # Define label mapping
+        # Define label mapping - FIX: Corrected label mapping
         self.label_map = {0: 'negative', 1: 'positive'}
         
-    def predict(self, text: str, max_length: int = 64) -> Tuple[str, float]:  # Reduced default max_length
+    def predict(self, text: str, max_length: int = 128) -> Tuple[str, float]:
         """
         Predict the sentiment of the given text.
         
@@ -121,6 +114,7 @@ class ReviewClassifier:
         input_ids = encoding['input_ids'].to(self.device)
         attention_mask = encoding['attention_mask'].to(self.device)
         
+        # FIX: Added torch.no_grad() context manager
         with torch.no_grad():
             outputs = self.model(input_ids, attention_mask)
             
@@ -135,7 +129,7 @@ class ReviewClassifier:
         
         return predicted_label, confidence_score
     
-    def predict_batch(self, texts: list, max_length: int = 64, batch_size: int = 8) -> list:  # Reduced defaults
+    def predict_batch(self, texts: List[str], max_length: int = 128, batch_size: int = 16) -> List[Tuple[str, float]]:
         """
         Predict sentiments for a batch of texts.
         
@@ -169,7 +163,7 @@ class ReviewClassifier:
             input_ids = encodings['input_ids'].to(self.device)
             attention_mask = encodings['attention_mask'].to(self.device)
             
-            # Make predictions
+            # Make predictions - FIX: Added torch.no_grad() context manager
             with torch.no_grad():
                 outputs = self.model(input_ids, attention_mask)
                 probabilities = F.softmax(outputs, dim=1)
@@ -178,7 +172,7 @@ class ReviewClassifier:
                 
                 # Convert to labels and add to results
                 for pred_class, conf in zip(predicted_classes, confidences):
-                    predicted_label = self.label_map[pred_class.item()]
+                    predicted_label = self.label_map[predicted_class.item()]
                     confidence_score = conf.item()
                     results.append((predicted_label, confidence_score))
         

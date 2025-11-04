@@ -101,7 +101,7 @@ class ProductVectorStore:
                 self.client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(
-                        size=self.vector_size,  # FIXED: Use correct vector size
+                        size=self.vector_size,
                         distance=Distance.COSINE
                     )
                 )
@@ -149,7 +149,7 @@ class ProductVectorStore:
                 # Use [CLS] token embedding (first token)
                 embedding = outputs.last_hidden_state[:, 0].cpu().numpy()
             
-            # FIXED: Remove the extra dimension, use flatten directly
+            # FIX: Remove the extra 0.0 append that caused dimension mismatch
             return embedding.flatten()
             
         except Exception as e:
@@ -177,6 +177,12 @@ class ProductVectorStore:
         embedding = self.encode_text(text_to_encode)
         
         if embedding is None:
+            logger.error(f"Failed to encode product: {product_title}")
+            return False
+        
+        # FIX: Check if embedding has correct dimensions
+        if embedding.shape[0] != self.vector_size:
+            logger.error(f"Embedding dimension mismatch: expected {self.vector_size}, got {embedding.shape[0]}")
             return False
         
         try:
@@ -220,6 +226,7 @@ class ProductVectorStore:
         # Encode the query
         query_embedding = self.encode_text(query)
         if query_embedding is None:
+            logger.error(f"Failed to encode query: {query}")
             return []
         
         try:
@@ -294,17 +301,21 @@ class ProductVectorStore:
         ]
         
         # Create collection if it doesn't exist
-        self.create_collection()
+        if not self.create_collection():
+            logger.error("Failed to create collection for sample products")
+            return
         
         # Add sample products
+        successful_adds = 0
         for product in sample_products:
-            self.add_product(
+            if self.add_product(
                 product_id=product["id"],
                 product_title=product["title"],
                 product_description=product["description"]
-            )
+            ):
+                successful_adds += 1
         
-        logger.info(f"Added {len(sample_products)} sample products")
+        logger.info(f"Added {successful_adds}/{len(sample_products)} sample products")
     
     def get_collection_info(self) -> Optional[Dict[str, Any]]:
         """Get information about the collection."""
@@ -314,9 +325,9 @@ class ProductVectorStore:
         try:
             info = self.client.get_collection(self.collection_name)
             return {
-                "name": self.collection_name,  # FIXED: Use collection_name instead of vector size
+                "name": self.collection_name,  # FIX: Use collection name instead of size
                 "vector_size": info.config.params.vectors.size,
-                "distance": info.config.params.vectors.distance.name,
+                "distance": info.config.params.vectors.distance.name,  # FIX: Get distance name
                 "points_count": info.points_count
             }
         except Exception as e:

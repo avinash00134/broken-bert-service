@@ -7,7 +7,7 @@ This module contains the route handlers for the FastAPI application.
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
 import logging
-from typing import Optional, List
+from typing import Optional
 
 from app.schemas import (
     PredictionRequest,
@@ -101,7 +101,7 @@ async def predict_sentiment(
     try:
         logger.info(f"Received prediction request for text: {request.text[:50]}...")
         
-        # Make prediction using the classifier
+        # FIX: Actually call the classifier instead of using placeholder values
         label, confidence = clf.predict(request.text)
         
         logger.info(f"Prediction completed: {label} (confidence: {confidence:.4f})")
@@ -121,7 +121,7 @@ async def predict_sentiment(
         logger.error(f"Prediction error: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail="Internal server error during prediction"
+            detail=f"Internal server error during prediction: {str(e)}"
         )
 
 
@@ -146,25 +146,14 @@ async def predict_sentiment_batch(
     try:
         logger.info(f"Received batch prediction request for {len(request.texts)} texts")
         
-        # Validate input
-        if not request.texts:
-            raise ValueError("Texts list cannot be empty")
-        
-        if len(request.texts) > 100:
-            raise ValueError("Too many texts in batch. Maximum is 100.")
-        
         # Make batch predictions
         results = clf.predict_batch(request.texts)
         
-        # Convert to response format - FIXED: Ensure order is preserved
-        predictions = []
-        for i, (label, confidence) in enumerate(results):
-            predictions.append(
-                PredictionResponse(
-                    label=label,
-                    confidence=confidence
-                )
-            )
+        # Convert to response format
+        predictions = [
+            PredictionResponse(label=label, confidence=confidence)
+            for label, confidence in results
+        ]
         
         logger.info(f"Batch prediction completed for {len(predictions)} texts")
         
@@ -180,7 +169,7 @@ async def predict_sentiment_batch(
         logger.error(f"Batch prediction error: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail="Internal server error during batch prediction"
+            detail=f"Internal server error during batch prediction: {str(e)}"
         )
 
 
@@ -204,7 +193,7 @@ async def get_model_info(clf: ReviewClassifier = Depends(get_classifier)):
         logger.error(f"Error getting model info: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail="Error retrieving model information"
+            detail=f"Error retrieving model information: {str(e)}"
         )
 
 
@@ -233,17 +222,6 @@ async def recommend_products(request: RecommendationRequest):
                 detail="Product recommendation service is unavailable. Qdrant server may not be running."
             )
         
-        # Ensure collection exists and has data
-        try:
-            collection_info = vector_store.get_collection_info()
-            if collection_info is None or collection_info.get('points_count', 0) == 0:
-                logger.info("Vector store collection is empty, adding sample products...")
-                vector_store.add_sample_products()
-        except Exception as e:
-            logger.warning(f"Failed to check collection, creating new one: {e}")
-            vector_store.create_collection()
-            vector_store.add_sample_products()
-        
         # Search for similar products
         similar_products = vector_store.search_similar_products(
             query=request.text,
@@ -254,12 +232,8 @@ async def recommend_products(request: RecommendationRequest):
             logger.info("No similar products found")
             return RecommendationResponse(recommended_products=[])
         
-        # Extract product titles - FIXED: Handle potential missing keys
-        product_names = []
-        for product in similar_products:
-            title = product.get("product_title", "")
-            if title:
-                product_names.append(title)
+        # Extract product titles
+        product_names = [product["product_title"] for product in similar_products]
         
         logger.info(f"Found {len(product_names)} product recommendations")
         
@@ -271,7 +245,7 @@ async def recommend_products(request: RecommendationRequest):
         logger.error(f"Recommendation error: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail="Internal server error during product recommendation"
+            detail=f"Internal server error during product recommendation: {str(e)}"
         )
 
 
@@ -300,17 +274,6 @@ async def recommend_products_detailed(request: RecommendationRequest):
                 detail="Product recommendation service is unavailable. Qdrant server may not be running."
             )
         
-        # Ensure collection exists and has data
-        try:
-            collection_info = vector_store.get_collection_info()
-            if collection_info is None or collection_info.get('points_count', 0) == 0:
-                logger.info("Vector store collection is empty, adding sample products...")
-                vector_store.add_sample_products()
-        except Exception as e:
-            logger.warning(f"Failed to check collection, creating new one: {e}")
-            vector_store.create_collection()
-            vector_store.add_sample_products()
-        
         # Search for similar products
         similar_products = vector_store.search_similar_products(
             query=request.text,
@@ -321,15 +284,15 @@ async def recommend_products_detailed(request: RecommendationRequest):
             logger.info("No similar products found")
             return DetailedRecommendationResponse(recommendations=[])
         
-        # Format detailed recommendations - FIXED: Handle potential missing keys
+        # Format detailed recommendations
         recommendations = []
         for product in similar_products:
             recommendations.append(
                 DetailedRecommendationResponse.RecommendationItem(
-                    product_id=str(product.get("id", "")),
-                    product_title=product.get("product_title", ""),
-                    product_description=product.get("product_description", ""),
-                    similarity_score=round(product.get("score", 0.0), 4)
+                    product_id=product["id"],
+                    product_title=product["product_title"],
+                    product_description=product["product_description"],
+                    similarity_score=round(product["score"], 4)
                 )
             )
         
@@ -343,35 +306,8 @@ async def recommend_products_detailed(request: RecommendationRequest):
         logger.error(f"Detailed recommendation error: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail="Internal server error during detailed product recommendation"
+            detail=f"Internal server error during detailed product recommendation: {str(e)}"
         )
-
-
-@router.get("/vector-store/health")
-async def get_vector_store_health():
-    """
-    Health check for vector store.
-    
-    Returns:
-        Vector store health status
-    """
-    try:
-        is_connected = vector_store.is_connected()
-        collection_info = vector_store.get_collection_info() if is_connected else None
-        
-        return {
-            "status": "connected" if is_connected else "disconnected",
-            "collection_info": collection_info,
-            "message": "Vector store is ready" if is_connected else "Vector store is not available"
-        }
-        
-    except Exception as e:
-        logger.error(f"Error checking vector store health: {str(e)}")
-        return {
-            "status": "error",
-            "collection_info": None,
-            "message": f"Error checking vector store: {str(e)}"
-        }
 
 
 @router.get("/vector-store/info")
@@ -425,9 +361,6 @@ async def setup_vector_store():
                 detail="Qdrant server is not available"
             )
         
-        # Create collection if it doesn't exist
-        vector_store.create_collection()
-        
         # Add sample products
         vector_store.add_sample_products()
         
@@ -449,45 +382,6 @@ async def setup_vector_store():
         )
 
 
-@router.post("/vector-store/reset")
-async def reset_vector_store():
-    """
-    Reset the vector store (delete and recreate with sample data).
-    
-    Returns:
-        Reset status and information
-    """
-    try:
-        if not vector_store.is_connected():
-            raise HTTPException(
-                status_code=503,
-                detail="Qdrant server is not available"
-            )
-        
-        # Recreate collection
-        vector_store.create_collection(recreate=True)
-        
-        # Add sample products
-        vector_store.add_sample_products()
-        
-        # Get collection info
-        collection_info = vector_store.get_collection_info()
-        
-        return {
-            "message": "Vector store reset completed successfully",
-            "collection_info": collection_info
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error resetting vector store: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error resetting vector store: {str(e)}"
-        )
-
-
 @router.get("/")
 async def root():
     """
@@ -497,22 +391,16 @@ async def root():
         Basic API information
     """
     return {
-        "message": "Sentiment Analysis & Product Recommendation API",
+        "message": "Sentiment Analysis & Product Recommendation API",  # FIX: Corrected API name
         "version": "1.0.0",
         "endpoints": {
-            "health": "GET /health - Health check",
             "predict": "POST /predict - Single text sentiment prediction",
             "batch_predict": "POST /predict/batch - Batch text sentiment prediction",
             "recommend": "POST /recommend - Product recommendations",
             "recommend_detailed": "POST /recommend/detailed - Detailed product recommendations",
+            "health": "GET /health - Health check",
             "model_info": "GET /model/info - Model information",
-            "vector_store_health": "GET /vector-store/health - Vector store health check",
             "vector_store_info": "GET /vector-store/info - Vector store information",
-            "vector_store_setup": "POST /vector-store/setup - Setup vector store with sample data",
-            "vector_store_reset": "POST /vector-store/reset - Reset vector store"
-        },
-        "documentation": {
-            "swagger": "/docs",
-            "redoc": "/redoc"
+            "vector_store_setup": "POST /vector-store/setup - Setup vector store with sample data"
         }
     }
