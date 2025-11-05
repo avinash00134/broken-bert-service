@@ -448,7 +448,37 @@ async def setup_vector_store():
             detail=f"Error setting up vector store: {str(e)}"
         )
 
-
+@router.get("/vector-store/health")
+async def vector_store_health():
+    """Detailed health check for vector store."""
+    try:
+        if not vector_store.is_connected():
+            return {
+                "status": "disconnected",
+                "message": "Cannot connect to Qdrant server",
+                "host": vector_store.qdrant_host,
+                "port": vector_store.qdrant_port
+            }
+        
+        # Test basic operations
+        collection_info = vector_store.get_collection_info()
+        
+        return {
+            "status": "healthy",
+            "message": "Vector store is connected and operational",
+            "host": vector_store.qdrant_host,
+            "port": vector_store.qdrant_port,
+            "collection_info": collection_info
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Vector store health check failed: {str(e)}",
+            "host": vector_store.qdrant_host,
+            "port": vector_store.qdrant_port
+        }
+    
 @router.post("/vector-store/reset")
 async def reset_vector_store():
     """

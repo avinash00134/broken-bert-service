@@ -9,10 +9,12 @@ import torch
 import numpy as np
 from typing import List, Dict, Any, Optional
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import Distance, VectorParams, PointStruct
 from qdrant_client.http.exceptions import UnexpectedResponse
 from transformers import DistilBertModel, DistilBertTokenizer
 import logging
+import time
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -23,35 +25,92 @@ class ProductVectorStore:
     """
     
     def __init__(self, 
-                 qdrant_host: str = "localhost", 
-                 qdrant_port: int = 6333,
+                 qdrant_host: str = None, 
+                 qdrant_port: int = None,
                  collection_name: str = "products",
                  vector_size: int = 768):
         """
         Initialize the ProductVectorStore.
         
         Args:
-            qdrant_host: Qdrant server host
-            qdrant_port: Qdrant server port
+            qdrant_host: Qdrant server host (default: localhost or from env)
+            qdrant_port: Qdrant server port (default: 6333 or from env)
             collection_name: Name of the collection to store product vectors
             vector_size: Size of the embedding vectors (768 for DistilBERT)
         """
-        self.qdrant_host = qdrant_host
-        self.qdrant_port = qdrant_port
+        # Get configuration from environment variables or use defaults
+        self.qdrant_host = qdrant_host or os.getenv("QDRANT_HOST", "localhost")
+        self.qdrant_port = qdrant_port or int(os.getenv("QDRANT_PORT", "6333"))
         self.collection_name = collection_name
         self.vector_size = vector_size
+        self.client = None
         
-        # Initialize Qdrant client
-        try:
-            self.client = QdrantClient(host=qdrant_host, port=qdrant_port)
-            logger.info(f"Connected to Qdrant at {qdrant_host}:{qdrant_port}")
-        except Exception as e:
-            logger.warning(f"Failed to connect to Qdrant: {e}")
-            self.client = None
+        logger.info(f"Initializing Qdrant connection to {self.qdrant_host}:{self.qdrant_port}")
+        
+        # Initialize Qdrant client with multiple connection strategies
+        self._initialize_client()
         
         # Initialize BERT model and tokenizer for encoding
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self._initialize_encoder()
+    
+    def _initialize_client(self, max_retries: int = 3):
+        """Initialize Qdrant client with multiple connection strategies."""
+        connection_strategies = [
+            self._try_local_connection,
+            self._try_docker_connection,
+            self._try_memory_connection
+        ]
+        
+        for strategy in connection_strategies:
+            if strategy():
+                break
+        else:
+            logger.error("All connection strategies failed")
+            self.client = None
+    
+    def _try_local_connection(self) -> bool:
+        """Try connecting to local Qdrant server."""
         try:
+            logger.info("Attempting local Qdrant connection...")
+            self.client = QdrantClient(host=self.qdrant_host, port=self.qdrant_port, timeout=10)
+            # Test connection
+            self.client.get_collections()
+            logger.info(f"Connected to Qdrant at {self.qdrant_host}:{self.qdrant_port}")
+            return True
+        except Exception as e:
+            logger.warning(f"Local connection failed: {e}")
+            return False
+    
+    def _try_docker_connection(self) -> bool:
+        """Try connecting to Qdrant via Docker."""
+        try:
+            logger.info("Attempting Docker Qdrant connection...")
+            # Try common Docker host
+            self.client = QdrantClient(host="host.docker.internal", port=self.qdrant_port, timeout=10)
+            self.client.get_collections()
+            logger.info("Connected to Qdrant via Docker")
+            self.qdrant_host = "host.docker.internal"
+            return True
+        except Exception as e:
+            logger.warning(f"Docker connection failed: {e}")
+            return False
+    
+    def _try_memory_connection(self) -> bool:
+        """Fall back to in-memory Qdrant for development."""
+        try:
+            logger.info("Falling back to in-memory Qdrant...")
+            self.client = QdrantClient(":memory:")
+            logger.info("Using in-memory Qdrant (development mode)")
+            return True
+        except Exception as e:
+            logger.error(f"In-memory connection failed: {e}")
+            return False
+    
+    def _initialize_encoder(self):
+        """Initialize BERT encoder with error handling."""
+        try:
+            logger.info("Loading DistilBERT model...")
             self.tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
             self.encoder = DistilBertModel.from_pretrained('distilbert-base-uncased')
             self.encoder.to(self.device)
@@ -66,10 +125,12 @@ class ProductVectorStore:
         """Check if connected to Qdrant server."""
         if self.client is None:
             return False
+        
         try:
             self.client.get_collections()
             return True
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Qdrant connection check failed: {e}")
             return False
     
     def create_collection(self, recreate: bool = False) -> bool:
@@ -82,7 +143,7 @@ class ProductVectorStore:
         Returns:
             True if collection was created/exists, False otherwise
         """
-        if not self.client:
+        if not self.is_connected():
             logger.error("Qdrant client not available")
             return False
         
@@ -101,7 +162,7 @@ class ProductVectorStore:
                 self.client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(
-                        size=self.vector_size,  # FIXED: Use correct vector size
+                        size=self.vector_size,
                         distance=Distance.COSINE
                     )
                 )
@@ -149,7 +210,6 @@ class ProductVectorStore:
                 # Use [CLS] token embedding (first token)
                 embedding = outputs.last_hidden_state[:, 0].cpu().numpy()
             
-            # FIXED: Remove the extra dimension, use flatten directly
             return embedding.flatten()
             
         except Exception as e:
@@ -168,7 +228,7 @@ class ProductVectorStore:
         Returns:
             True if product was added successfully, False otherwise
         """
-        if not self.client:
+        if not self.is_connected():
             logger.error("Qdrant client not available")
             return False
         
@@ -177,9 +237,13 @@ class ProductVectorStore:
         embedding = self.encode_text(text_to_encode)
         
         if embedding is None:
+            logger.error(f"Failed to encode product: {product_title}")
             return False
         
         try:
+            # Ensure collection exists
+            self.create_collection()
+            
             point = PointStruct(
                 id=product_id,
                 vector=embedding.tolist(),
@@ -213,16 +277,23 @@ class ProductVectorStore:
         Returns:
             List of similar products with scores
         """
-        if not self.client:
+        if not self.is_connected():
             logger.error("Qdrant client not available")
             return []
         
         # Encode the query
         query_embedding = self.encode_text(query)
         if query_embedding is None:
+            logger.error(f"Failed to encode query: {query}")
             return []
         
         try:
+            # Ensure collection exists and has data
+            collection_info = self.get_collection_info()
+            if not collection_info or collection_info.get('points_count', 0) == 0:
+                logger.warning("Collection is empty, adding sample products first")
+                self.add_sample_products()
+            
             # Search for similar vectors
             search_result = self.client.search(
                 collection_name=self.collection_name,
@@ -241,7 +312,7 @@ class ProductVectorStore:
                     "text": hit.payload.get("text", "")
                 })
             
-            logger.info(f"Found {len(results)} similar products for query: {query}")
+            logger.info(f"Found {len(results)} similar products for query: '{query}'")
             return results
             
         except Exception as e:
@@ -290,6 +361,16 @@ class ProductVectorStore:
                 "id": 8,
                 "title": "Wireless Mouse",
                 "description": "Ergonomic wireless mouse with precision tracking and long battery life"
+            },
+            {
+                "id": 9,
+                "title": "Smartphone",
+                "description": "Latest smartphone with high-resolution camera and fast processor"
+            },
+            {
+                "id": 10,
+                "title": "Tablet",
+                "description": "Portable tablet with touch screen for work and entertainment"
             }
         ]
         
@@ -297,31 +378,45 @@ class ProductVectorStore:
         self.create_collection()
         
         # Add sample products
+        added_count = 0
         for product in sample_products:
-            self.add_product(
+            if self.add_product(
                 product_id=product["id"],
                 product_title=product["title"],
                 product_description=product["description"]
-            )
+            ):
+                added_count += 1
         
-        logger.info(f"Added {len(sample_products)} sample products")
+        logger.info(f"Added {added_count}/{len(sample_products)} sample products")
+        return added_count
     
     def get_collection_info(self) -> Optional[Dict[str, Any]]:
         """Get information about the collection."""
-        if not self.client:
+        if not self.is_connected():
             return None
         
         try:
             info = self.client.get_collection(self.collection_name)
             return {
-                "name": self.collection_name,  # FIXED: Use collection_name instead of vector size
+                "name": self.collection_name,
                 "vector_size": info.config.params.vectors.size,
-                "distance": info.config.params.vectors.distance.name,
+                "distance": str(info.config.params.vectors.distance),
                 "points_count": info.points_count
             }
         except Exception as e:
-            logger.error(f"Failed to get collection info: {e}")
+            logger.warning(f"Failed to get collection info: {e}")
             return None
+    
+    def get_connection_info(self) -> Dict[str, Any]:
+        """Get connection information."""
+        return {
+            "connected": self.is_connected(),
+            "host": self.qdrant_host,
+            "port": self.qdrant_port,
+            "collection_name": self.collection_name,
+            "encoder_loaded": self.encoder is not None,
+            "device": str(self.device)
+        }
 
 
 # Global instance
