@@ -86,7 +86,7 @@ class ReviewClassifier:
         # Define label mapping
         self.label_map = {0: 'negative', 1: 'positive'}
         
-    def predict(self, text: str, max_length: int = 64) -> Tuple[str, float]:  # Reduced default max_length
+    def predict(self, text: str, max_length: int = 128) -> Tuple[str, float]:
         """
         Predict the sentiment of the given text.
         
@@ -121,6 +121,7 @@ class ReviewClassifier:
         input_ids = encoding['input_ids'].to(self.device)
         attention_mask = encoding['attention_mask'].to(self.device)
         
+        # Make prediction (ADD THE MISSING CONTEXT MANAGER)
         with torch.no_grad():
             outputs = self.model(input_ids, attention_mask)
             

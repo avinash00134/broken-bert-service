@@ -45,24 +45,26 @@ async def lifespan(app: FastAPI):
     logger.info("Starting sentiment analysis API...")
     
     try:
-        # Load the model during startup
-        # FIXED: Corrected path from "accets" to "assets"
-        model_path = "assets/model.pth"
-        tokenizer_path = "assets/tokenizer/"
+        # Load the model during startup - USE RAW STRINGS FOR WINDOWS PATHS
+        model_path = r"E:\work\broken-bert-service\assets\model.pth"
+        tokenizer_path = r"E:\work\broken-bert-service\assets\tokenizer"
         
-        # Create assets directory if it doesn't exist
-        os.makedirs("assets", exist_ok=True)
+        # Debug: Check if paths exist
+        logger.info(f"Model path: {model_path}")
+        logger.info(f"Tokenizer path: {tokenizer_path}")
+        logger.info(f"Model exists: {os.path.exists(model_path)}")
+        logger.info(f"Tokenizer exists: {os.path.exists(tokenizer_path)}")
         
         if not os.path.exists(model_path):
             logger.error(f"Model file not found: {model_path}")
             logger.error("Please run 'python -m ml.train' first to train the model.")
-            # Don't raise error, just log and continue without model
-            logger.warning("API starting without model - training required")
+            classifier = None
+            set_classifier(classifier)
         elif not os.path.exists(tokenizer_path):
             logger.error(f"Tokenizer directory not found: {tokenizer_path}")
             logger.error("Please run 'python -m ml.train' first to train the model.")
-            # Don't raise error, just log and continue without model
-            logger.warning("API starting without model - training required")
+            classifier = None
+            set_classifier(classifier)
         else:
             # Initialize the classifier
             classifier = ReviewClassifier(
@@ -78,14 +80,15 @@ async def lifespan(app: FastAPI):
         
     except Exception as e:
         logger.error(f"Failed to load model during startup: {str(e)}")
-        # Don't crash the app if model loading fails
-        logger.warning("API starting without model due to loading error")
+        import traceback
+        logger.error(traceback.format_exc())
+        classifier = None
+        set_classifier(classifier)
     
     yield
     
     # Shutdown
     logger.info("Shutting down sentiment analysis API...")
-    # Cleanup if needed
     classifier = None
 
 
